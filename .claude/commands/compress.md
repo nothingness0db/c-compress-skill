@@ -292,6 +292,58 @@ def merge_results() -> dict:
     return {"failed": failed, "processed": processed}
 
 
+_VAGUE_TIME_RE = re.compile(
+    r"未标明|不明|具体时间|^\d{1,2}月-\d{1,2}月$|^早期$|^初期$|^后期$|^某|^不详$",
+    re.UNICODE,
+)
+
+
+def find_unclear() -> list:
+    if not os.path.isdir(JSON_DIR):
+        print("没有 JSON 数据，跳过补全扫描。")
+        return []
+    unclear = []
+    for fname in sorted(os.listdir(JSON_DIR)):
+        if not fname.endswith(".json"):
+            continue
+        data = json.load(open(os.path.join(JSON_DIR, fname), encoding="utf-8"))
+        for i, ev in enumerate(data.get("events", [])):
+            t = ev.get("time", "").strip()
+            if not t or _VAGUE_TIME_RE.search(t):
+                unclear.append({
+                    "json_file": fname,
+                    "source": data.get("source", fname),
+                    "event_index": i,
+                    "title": ev.get("title", ""),
+                    "current_time": t or "（空）",
+                })
+    out_path = os.path.join(OUTPUT_DIR, "unclear_events.json")
+    json.dump(unclear, open(out_path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+    if unclear:
+        print(f"找到 {len(unclear)} 个时间不明确的事件 → {out_path}")
+    else:
+        print("所有事件均有明确时间，无需补全。")
+    return unclear
+
+
+def patch_event(json_file: str, event_index: int, updates: dict):
+    path = os.path.join(JSON_DIR, json_file)
+    data = json.load(open(path, encoding="utf-8"))
+    ev = data["events"][event_index]
+    if "time" in updates and updates["time"]:
+        ev["time"] = updates["time"]
+    if "facts_append" in updates:
+        extra = updates["facts_append"]
+        if isinstance(extra, str):
+            extra = [extra]
+        ev.setdefault("facts", [])
+        ev["facts"].extend(extra)
+    for k in ("action", "psych", "conclusion"):
+        if k in updates and updates[k]:
+            ev[k] = updates[k]
+    json.dump(data, open(path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+
+
 def _sort_key(time_str: str):
     t = str(time_str).strip()
     year = int(m.group(1)) if (m := re.search(r"(20\d{2})", t)) else 0
@@ -433,6 +485,14 @@ def main():
         assemble(mode)
     elif cmd == "update-state":
         legacy_update_state()
+    elif cmd == "find-unclear":
+        find_unclear()
+    elif cmd == "patch-event":
+        json_file = sys.argv[2]
+        event_index = int(sys.argv[3])
+        updates = json.loads(sys.argv[4])
+        patch_event(json_file, event_index, updates)
+        print(f"已更新 {json_file} 第 {event_index} 个事件")
     elif cmd == "status":
         state = load_state()
         current = scan_input()
@@ -576,7 +636,51 @@ python3 assemble.py merge-results
 
 ---
 
-## 第四步：组装输出
+## 第四步：补全询问（仅 events 模式）
+
+**zip 模式跳过此步骤。**
+
+运行：
+
+```bash
+python3 assemble.py find-unclear
+```
+
+- 输出"所有事件均有明确时间" → 跳到第五步。
+- 输出"找到 N 个时间不明确的事件" → 继续以下流程。
+
+读取 `output/unclear_events.json`，将所有需要补全的事件整理成一张清单，**直接向用户提问**：
+
+---
+
+以下事件缺少明确时间，你能补充吗？不知道的直接跳过，想补充背景的也可以一起说。
+
+[按编号列出，每条格式：]
+N. 「{title}」（来源：{source}）
+   当前：{current_time}
+   → 大约发生在什么时候？有没有要补充的背景？
+
+---
+
+**等待用户回复。** 根据用户的回答，对每个有效回复：
+
+1. 解析用户提供的时间（支持模糊描述，如"去年十月"→ `2025-10`、"三月底" → `03-下旬`）
+2. 如果用户同时提供了额外背景信息，将其作为新的 facts 条目
+3. 调用 `patch-event` 更新对应 JSON 文件：
+
+```bash
+python3 assemble.py patch-event <json_file> <event_index> '<json_updates>'
+```
+
+`<json_updates>` 格式示例：
+- 只更新时间：`{"time": "2025-10"}`
+- 时间 + 补充事实：`{"time": "03-26", "facts_append": ["用户当时在外地出差，这是她回城后第一次上网"]}`
+
+用户跳过的事件保持原样，不需要强求。所有更新完成后继续。
+
+---
+
+## 第五步：组装输出
 
 ```bash
 python3 assemble.py assemble --mode=MODE
@@ -586,7 +690,7 @@ python3 assemble.py assemble --mode=MODE
 
 ---
 
-## 第五步：报告
+## 第六步：报告
 
 告诉用户：
 - 使用的模式（zip / events）
