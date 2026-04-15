@@ -346,9 +346,16 @@ def patch_event(json_file: str, event_index: int, updates: dict):
 
 def _sort_key(time_str: str):
     t = str(time_str).strip()
-    year = int(m.group(1)) if (m := re.search(r"(20\d{2})", t)) else 0
-    month = int(m.group(1)) if (m := re.search(r"(\d{1,2})-\d", t)) else 99
-    day = int(m.group(2)) if (m := re.search(r"\d{1,2}-(\d{1,2})", t)) else 99
+    ym = re.search(r"(20\d{2})", t)
+    year = int(ym.group(1)) if ym else 0
+    rest = t[ym.end():].lstrip("-").strip() if ym else t
+    md = re.search(r"(\d{1,2})-(\d{1,2})", rest)
+    if md:
+        month, day = int(md.group(1)), int(md.group(2))
+    elif m := re.search(r"(\d{1,2})", rest):
+        month, day = int(m.group(1)), 99
+    else:
+        month, day = 99, 99
     return year, month, day, t
 
 
