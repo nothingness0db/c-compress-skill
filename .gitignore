@@ -1,0 +1,10 @@
+input/
+output/
+state.json
+assemble.py
+__pycache__/
+*.pyc
+prompts/
+repair_json.py
+chunk_file.py
+SPEC.md
