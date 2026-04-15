@@ -1,9 +1,20 @@
 你是 Compression 项目的增量压缩管理器。执行以下完整流程。
 
 **模式选择**：
-- 用户输入 `/compress --mode=events` → events 模式（提取关键事件，生成时间线）
-- 用户输入 `/compress --mode=zip` 或直接 `/compress` → zip 模式（高保真语义压缩，**默认**）
-- 将选择的模式记为 `MODE`，后续步骤全程使用。
+- 输入参数含 `--mode=zip` → MODE = `zip`，跳过询问直接开始
+- 输入参数含 `--mode=events` → MODE = `events`，跳过询问直接开始
+- **无参数时**：向用户展示以下提示，等待回复：
+
+---
+选择压缩模式（直接回车 = Events）：
+
+**1. Events（默认）** — 提取关键事件，生成时间线 + 月度汇总
+**2. Zip** — 高保真叙事压缩，保留对话原有语感
+
+---
+
+根据回复确定 MODE：输入 `2`、`zip`、`z` → `zip`；其他一律 `events`。  
+将 MODE 记下，后续步骤全程使用。
 
 **所有依赖都内联在本文件中。不读取任何外部 prompt 文件。辅助文件不存在时自动创建。**
 
@@ -308,21 +319,30 @@ def find_unclear() -> list:
             continue
         data = json.load(open(os.path.join(JSON_DIR, fname), encoding="utf-8"))
         for i, ev in enumerate(data.get("events", [])):
+            issues = []
             t = ev.get("time", "").strip()
             if not t or _VAGUE_TIME_RE.search(t):
+                issues.append(f"时间：{t or '（空）'}")
+            for field, label in [("action", "行动"), ("psych", "心理"), ("conclusion", "结论")]:
+                if not ev.get(field, "").strip():
+                    issues.append(f"{label}：（空）")
+            if not ev.get("facts"):
+                issues.append("事实：（空）")
+            if issues:
                 unclear.append({
                     "json_file": fname,
                     "source": data.get("source", fname),
                     "event_index": i,
                     "title": ev.get("title", ""),
                     "current_time": t or "（空）",
+                    "issues": issues,
                 })
     out_path = os.path.join(OUTPUT_DIR, "unclear_events.json")
     json.dump(unclear, open(out_path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
     if unclear:
-        print(f"找到 {len(unclear)} 个时间不明确的事件 → {out_path}")
+        print(f"找到 {len(unclear)} 个待补全事件 → {out_path}")
     else:
-        print("所有事件均有明确时间，无需补全。")
+        print("所有事件信息完整，无需补全。")
     return unclear
 
 
@@ -346,17 +366,30 @@ def patch_event(json_file: str, event_index: int, updates: dict):
 
 def _sort_key(time_str: str):
     t = str(time_str).strip()
-    ym = re.search(r"(20\d{2})", t)
-    year = int(ym.group(1)) if ym else 0
-    rest = t[ym.end():].lstrip("-").strip() if ym else t
-    md = re.search(r"(\d{1,2})-(\d{1,2})", rest)
-    if md:
-        month, day = int(md.group(1)), int(md.group(2))
-    elif m := re.search(r"(\d{1,2})", rest):
-        month, day = int(m.group(1)), 99
-    else:
-        month, day = 99, 99
-    return year, month, day, t
+
+    # YYYY-MM-DD (full date)
+    if m := re.search(r"(20\d{2})-(\d{1,2})-(\d{1,2})", t):
+        return int(m.group(1)), int(m.group(2)), int(m.group(3)), t
+
+    # YYYY-MM (year + month, e.g. "2025-12", "2025-12 起")
+    if m := re.search(r"(20\d{2})-(\d{1,2})(?!\d)", t):
+        return int(m.group(1)), int(m.group(2)), 99, t
+
+    # YYYY only (e.g. "2024-10 至 2025-12" → use first year)
+    if m := re.search(r"(20\d{2})", t):
+        return int(m.group(1)), 99, 99, t
+
+    # MM-DD (no year, e.g. "03-26", "03-27 22:53 - 03-30")
+    # Must start at string start or after whitespace to avoid matching HH:MM:SS fragments
+    if m := re.search(r"(?:^|\s)(\d{1,2})-(\d{1,2})", t):
+        mo = int(m.group(1))
+        if 1 <= mo <= 12:
+            # Data spans 2025-07 ~ 2026-06: months ≤6 → 2026, months ≥7 → 2025
+            year = 2026 if mo <= 6 else 2025
+            return year, mo, int(m.group(2)), t
+
+    # Pure times or unrecognised → sort to end
+    return 9999, 99, 99, t
 
 
 def assemble(mode: str = "zip"):
@@ -482,7 +515,7 @@ def legacy_update_state():
 
 def main():
     cmd = sys.argv[1] if len(sys.argv) > 1 else "run"
-    mode = next((a.split("=")[1] for a in sys.argv if a.startswith("--mode=")), "zip")
+    mode = next((a.split("=")[1] for a in sys.argv if a.startswith("--mode=")), "events")
 
     if cmd == "prepare":
         prepare(mode)
@@ -653,37 +686,36 @@ python3 assemble.py merge-results
 python3 assemble.py find-unclear
 ```
 
-- 输出"所有事件均有明确时间" → 跳到第五步。
-- 输出"找到 N 个时间不明确的事件" → 继续以下流程。
+- 输出"所有事件信息完整" → 跳到第五步。
+- 输出"找到 N 个待补全事件" → 继续以下流程。
 
-读取 `output/unclear_events.json`，将所有需要补全的事件整理成一张清单，**直接向用户提问**：
+读取 `output/unclear_events.json`，将清单一次性展示给用户：
 
 ---
 
-以下事件缺少明确时间，你能补充吗？不知道的直接跳过，想补充背景的也可以一起说。
+以下事件有缺失信息，**按编号说一遍就行**，不知道的说"跳过"，可以语音输入：
 
 [按编号列出，每条格式：]
 N. 「{title}」（来源：{source}）
-   当前：{current_time}
-   → 大约发生在什么时候？有没有要补充的背景？
+   {issues 列表，每行一条，如：时间：2025-12 起（具体？）/ 结论：（空）/ 心理：（空）}
 
 ---
 
-**等待用户回复。** 根据用户的回答，对每个有效回复：
+**等待用户一次性回复全部内容。**
 
-1. 解析用户提供的时间（支持模糊描述，如"去年十月"→ `2025-10`、"三月底" → `03-下旬`）
-2. 如果用户同时提供了额外背景信息，将其作为新的 facts 条目
-3. 调用 `patch-event` 更新对应 JSON 文件：
+收到回复后，逐条解析并调用 `patch-event`：
+
+1. 时间支持模糊描述（"去年十月" → `2025-10`，"三月底" → `03-下旬`，"上个月" → 根据当前日期推算）
+2. 用户提供的背景/补充信息作为 `facts_append`
+3. 用户直接填写的行动/心理/结论直接替换对应字段
 
 ```bash
 python3 assemble.py patch-event <json_file> <event_index> '<json_updates>'
 ```
 
-`<json_updates>` 格式示例：
-- 只更新时间：`{"time": "2025-10"}`
-- 时间 + 补充事实：`{"time": "03-26", "facts_append": ["用户当时在外地出差，这是她回城后第一次上网"]}`
+`<json_updates>` 支持字段：`time`、`facts_append`（数组或字符串）、`action`、`psych`、`conclusion`
 
-用户跳过的事件保持原样，不需要强求。所有更新完成后继续。
+用户说"跳过"的保持原样。全部更新完成后继续。
 
 ---
 

@@ -1,4 +1,5 @@
-input/
+input/*
+!input/test/
 output/
 state.json
 assemble.py
