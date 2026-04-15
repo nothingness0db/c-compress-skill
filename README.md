@@ -65,6 +65,20 @@ state.json 存储每个文件的 chunk 级 SHA-256 哈希。再次运行时：
 
 删除 `state.json` 可强制全量重跑。
 
+## 补全询问（events 模式）
+
+events 模式压缩完成后，自动扫描时间字段为空或模糊（"未标明具体时间"、纯月份范围等）的事件，整理成编号清单问你：
+
+```
+1. 「主角开始对一位现实中的Coser进行长期单向关注」
+   当前：未标明具体时间
+   → 大约发生在什么时候？有没有要补充的背景？
+```
+
+你可以回答时间（粗略也行，如"去年12月"、"上个月"），也可以顺带补充当时的背景。跳过的事件保持原样。答完后 Claude 直接更新 JSON 并重新生成报告。
+
+数据来源不只是原始文件——你作为当事人补充的信息同样写入归档。
+
 ---
 
 ## 架构
@@ -72,17 +86,20 @@ state.json 存储每个文件的 chunk 级 SHA-256 哈希。再次运行时：
 ```
 input/test/*.html|md|txt
         │
-        ▼ python3 assemble.py prepare --mode=MODE
+        ▼ assemble.py prepare --mode=MODE
   按 1500 字切 chunk，对比 chunk_cache
-        │ 只有未缓存的 chunk 进入 pending
-        ▼
-  每 5 个 chunk 打包成一个 batch（~7500 字）
-  所有 batch 并行发给子 Agent
-        │ Agent 输出结构化文本（===CHUNK=== / ===EVENT=== 格式）
-        ▼ python3 assemble.py merge-results
+  只有未缓存的 chunk 进入 pending
+        │
+        ▼ 每 5 个 chunk 一个 batch，并行子 Agent
+  Agent 输出 ===CHUNK=== / ===EVENT=== 结构化文本
+        │
+        ▼ assemble.py merge-results
   解析结果，写入 chunk_cache，重建文件级输出
         │
-        ▼ python3 assemble.py assemble --mode=MODE
+        ▼ assemble.py find-unclear（仅 events 模式）
+  找时间不明确的事件 → 问当事人 → patch-event 写回
+        │
+        ▼ assemble.py assemble --mode=MODE
   output/output.md
 ```
 
